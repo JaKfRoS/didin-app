@@ -29,18 +29,26 @@ import {
   Instagram,
   Globe,
   Banknote,
-  Percent
+  Percent,
+  Lock,
+  Printer
 } from 'lucide-react';
 import { 
-  UPLOAD_TIERS, 
-  PHOTO_TIERS, 
-  CONSTANT_PRICES, 
+  PricingConfig,
+  PricingTier,
+  getStoredPricingConfig,
   ServiceState, 
   QuoteBreakdown,
-  ExtraFee
+  ExtraFee,
+  InvoiceDocumentData,
+  createDefaultInvoiceData
 } from './types';
+import AdminPage from './AdminPage';
+import InvoiceView from './InvoiceView';
+import InvoicePage from './InvoicePage';
 import { GoogleGenAI } from "@google/genai";
 import { toJpeg } from 'html-to-image';
+import { jsPDF } from 'jspdf';
 
 // Helper for currency formatting
 const formatIDR = (val: number) => {
@@ -52,6 +60,14 @@ const formatIDR = (val: number) => {
 };
 
 export default function App() {
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig>(() => getStoredPricingConfig());
+  const [isAdminOpen, setIsAdminOpen] = useState<boolean>(() => {
+    return window.location.pathname.endsWith('/admin') || window.location.hash.includes('admin');
+  });
+  const [isInvoicePageOpen, setIsInvoicePageOpen] = useState<boolean>(() => {
+    return window.location.hash.includes('invoice');
+  });
+
   const [clientName, setClientName] = useState('');
   const [shopName, setShopName] = useState('');
   const [discountType, setDiscountType] = useState<'none' | 'nominal' | 'percent'>('none');
@@ -72,12 +88,129 @@ export default function App() {
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [loadingAi, setLoadingAi] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
   const [showFloatingBar, setShowFloatingBar] = useState(true);
 
   const desktopInvoiceRef = useRef<HTMLDivElement>(null);
   const mobileInvoiceRef = useRef<HTMLDivElement>(null);
   const invoiceSectionRef = useRef<HTMLElement>(null);
+
+  const calculateRate = (count: number, tiers: PricingTier[]) => {
+    if (!tiers || tiers.length === 0) return 0;
+    const sortedTiers = [...tiers].sort((a, b) => b.min - a.min);
+    const tier = sortedTiers.find(t => count >= t.min);
+    return tier ? tier.rate : sortedTiers[sortedTiers.length - 1].rate;
+  };
+
+  const breakdown = useMemo((): QuoteBreakdown => {
+    const uploadRate = calculateRate(state.uploadCount, pricingConfig.uploadTiers);
+    const photoRate = calculateRate(state.photoCount, pricingConfig.photoTiers);
+    
+    const uploadTotal = state.uploadCount * uploadRate;
+    const photoTotal = state.photoCount * photoRate;
+    const bannerTotal = state.bannerCount * pricingConfig.constantPrices.BANNER;
+    const videoTotal = state.videoCount * pricingConfig.constantPrices.VIDEO;
+    
+    let logoTotal = 0;
+    let logoName = 'Tanpa Logo';
+    if (state.logoType === 'client') {
+      logoTotal = pricingConfig.constantPrices.LOGO_CLIENT;
+      logoName = 'Logo (Konsep Klien)';
+    } else if (state.logoType === 'full') {
+      logoTotal = pricingConfig.constantPrices.LOGO_FULL;
+      logoName = 'Logo + Konsep (Pro)';
+    }
+
+    const extraFeesTotal = state.extraFees.reduce((sum, fee) => sum + fee.amount, 0);
+    const subtotal = uploadTotal + photoTotal + bannerTotal + videoTotal + logoTotal + extraFeesTotal;
+    
+    let discount = 0;
+    if (discountType === 'nominal') {
+      discount = discountValue;
+    } else if (discountType === 'percent') {
+      discount = subtotal * (discountValue / 100);
+    }
+
+    return {
+      upload: { count: state.uploadCount, rate: uploadRate, total: uploadTotal },
+      photo: { count: state.photoCount, rate: photoRate, total: photoTotal },
+      banner: { count: state.bannerCount, rate: pricingConfig.constantPrices.BANNER, total: bannerTotal },
+      video: { count: state.videoCount, rate: pricingConfig.constantPrices.VIDEO, total: videoTotal },
+      logo: { type: logoName, total: logoTotal },
+      extraFeesTotal,
+      subtotal,
+      discount,
+      grandTotal: Math.max(0, subtotal - discount)
+    };
+  }, [state, discountType, discountValue, pricingConfig]);
+
+  const [invoiceDocData, setInvoiceDocData] = useState<InvoiceDocumentData>(() => 
+    createDefaultInvoiceData('', '', undefined)
+  );
+
+  const handleSyncInvoiceFromCalc = useCallback(() => {
+    setInvoiceDocData(createDefaultInvoiceData(clientName, shopName, breakdown));
+  }, [clientName, shopName, breakdown]);
+
+  // Keep clientName & shopName updated in invoice metadata if edited in calc form
+  useEffect(() => {
+    setInvoiceDocData(prev => ({
+      ...prev,
+      clientName: clientName || prev.clientName,
+      projectDescription: shopName ? `Project Pembuatan Akun Shopee (${shopName})` : prev.projectDescription
+    }));
+  }, [clientName, shopName]);
+
+  // Listen for /admin path, #admin or #invoice hash
+  useEffect(() => {
+    const handleLocationChange = () => {
+      const isNavigatedToAdmin = window.location.pathname.endsWith('/admin') || window.location.hash.includes('admin');
+      const isNavigatedToInvoice = window.location.hash.includes('invoice');
+      
+      setIsAdminOpen(isNavigatedToAdmin);
+      setIsInvoicePageOpen(isNavigatedToInvoice);
+    };
+
+    handleLocationChange();
+
+    window.addEventListener('popstate', handleLocationChange);
+    window.addEventListener('hashchange', handleLocationChange);
+
+    return () => {
+      window.removeEventListener('popstate', handleLocationChange);
+      window.removeEventListener('hashchange', handleLocationChange);
+    };
+  }, []);
+
+  const openAdmin = () => {
+    setIsAdminOpen(true);
+    if (!window.location.hash.includes('admin')) {
+      window.history.pushState({}, '', '#admin');
+    }
+  };
+
+  const closeAdmin = () => {
+    setIsAdminOpen(false);
+    if (window.location.hash.includes('admin')) {
+      window.history.pushState({}, '', window.location.pathname);
+    }
+  };
+
+  const openInvoicePage = () => {
+    setIsInvoicePageOpen(true);
+    if (!window.location.hash.includes('invoice')) {
+      window.history.pushState({}, '', '#invoice');
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const closeInvoicePage = () => {
+    setIsInvoicePageOpen(false);
+    if (window.location.hash.includes('invoice')) {
+      window.history.pushState({}, '', window.location.pathname);
+    }
+  };
 
   // Intersection Observer to hide floating bar when invoice section is reached
   useEffect(() => {
@@ -101,53 +234,6 @@ export default function App() {
       }
     };
   }, []);
-
-  const calculateRate = (count: number, tiers: any[]) => {
-    const tier = tiers.find(t => count >= t.min);
-    return tier ? tier.rate : tiers[tiers.length - 1].rate;
-  };
-
-  const breakdown = useMemo((): QuoteBreakdown => {
-    const uploadRate = calculateRate(state.uploadCount, UPLOAD_TIERS);
-    const photoRate = calculateRate(state.photoCount, PHOTO_TIERS);
-    
-    const uploadTotal = state.uploadCount * uploadRate;
-    const photoTotal = state.photoCount * photoRate;
-    const bannerTotal = state.bannerCount * CONSTANT_PRICES.BANNER;
-    const videoTotal = state.videoCount * CONSTANT_PRICES.VIDEO;
-    
-    let logoTotal = 0;
-    let logoName = 'Tanpa Logo';
-    if (state.logoType === 'client') {
-      logoTotal = CONSTANT_PRICES.LOGO_CLIENT;
-      logoName = 'Logo (Konsep Klien)';
-    } else if (state.logoType === 'full') {
-      logoTotal = CONSTANT_PRICES.LOGO_FULL;
-      logoName = 'Logo + Konsep (Pro)';
-    }
-
-    const extraFeesTotal = state.extraFees.reduce((sum, fee) => sum + fee.amount, 0);
-    const subtotal = uploadTotal + photoTotal + bannerTotal + videoTotal + logoTotal + extraFeesTotal;
-    
-    let discount = 0;
-    if (discountType === 'nominal') {
-      discount = discountValue;
-    } else if (discountType === 'percent') {
-      discount = subtotal * (discountValue / 100);
-    }
-
-    return {
-      upload: { count: state.uploadCount, rate: uploadRate, total: uploadTotal },
-      photo: { count: state.photoCount, rate: photoRate, total: photoTotal },
-      banner: { count: state.bannerCount, rate: CONSTANT_PRICES.BANNER, total: bannerTotal },
-      video: { count: state.videoCount, rate: CONSTANT_PRICES.VIDEO, total: videoTotal },
-      logo: { type: logoName, total: logoTotal },
-      extraFeesTotal,
-      subtotal,
-      discount,
-      grandTotal: Math.max(0, subtotal - discount)
-    };
-  }, [state, discountType, discountValue]);
 
   const addExtraFee = () => {
     if (!newFeeLabel || !newFeeAmount) return;
@@ -213,11 +299,25 @@ Apakah rincian dan nominal di atas sudah sesuai? Jika ya, akan segera kami eksek
     setIsDownloading(true);
     try {
       await new Promise(resolve => setTimeout(resolve, 300));
-      const dataUrl = await toJpeg(targetRef.current, { 
-        quality: 1,
-        pixelRatio: 2,
-        backgroundColor: '#ffffff'
-      });
+      let dataUrl = '';
+      try {
+        dataUrl = await toJpeg(targetRef.current, { 
+          quality: 0.95,
+          pixelRatio: 2,
+          backgroundColor: '#ffffff',
+          skipFonts: true
+        });
+      } catch (e) {
+        console.warn('Initial JPEG conversion warning, trying fallback...', e);
+        dataUrl = await toJpeg(targetRef.current, { 
+          quality: 0.9,
+          pixelRatio: 1,
+          backgroundColor: '#ffffff',
+          skipFonts: true,
+          fontEmbedCSS: ''
+        });
+      }
+
       const link = document.createElement('a');
       link.download = `Invoice_OneWay_${shopName || clientName || 'Client'}_${new Date().getTime()}.jpg`;
       link.href = dataUrl;
@@ -227,6 +327,51 @@ Apakah rincian dan nominal di atas sudah sesuai? Jika ya, akan segera kami eksek
       alert('Gagal mengunduh gambar. Silakan coba lagi.');
     } finally {
       setIsDownloading(false);
+    }
+  };
+
+  const downloadInvoicePDF = async () => {
+    const targetRef = window.innerWidth >= 1024 ? desktopInvoiceRef : mobileInvoiceRef;
+    if (!targetRef.current) return;
+    setIsDownloadingPdf(true);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      let dataUrl = '';
+      try {
+        dataUrl = await toJpeg(targetRef.current, { 
+          quality: 0.95,
+          pixelRatio: 2,
+          backgroundColor: '#ffffff',
+          skipFonts: true
+        });
+      } catch (e) {
+        console.warn('Initial JPEG conversion warning, trying fallback...', e);
+        dataUrl = await toJpeg(targetRef.current, { 
+          quality: 0.9,
+          pixelRatio: 1,
+          backgroundColor: '#ffffff',
+          skipFonts: true,
+          fontEmbedCSS: ''
+        });
+      }
+
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4'
+      });
+
+      const imgProps = pdf.getImageProperties(dataUrl);
+      const pdfWidth = pdf.internal.pageSize.getWidth(); // 210mm
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+
+      pdf.addImage(dataUrl, 'JPEG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`Invoice_OneWay_${invoiceDocData.clientName || shopName || 'Client'}_${new Date().getTime()}.pdf`);
+    } catch (err) {
+      console.error('PDF Download failed', err);
+      alert('Gagal mengunduh PDF. Silakan coba lagi.');
+    } finally {
+      setIsDownloadingPdf(false);
     }
   };
 
@@ -253,16 +398,47 @@ Apakah rincian dan nominal di atas sudah sesuai? Jika ya, akan segera kami eksek
     } finally { setLoadingAi(false); }
   };
 
+  if (isAdminOpen) {
+    return (
+      <AdminPage 
+        currentConfig={pricingConfig} 
+        onSaveConfig={(newConfig) => setPricingConfig(newConfig)} 
+        onClose={closeAdmin} 
+      />
+    );
+  }
+
+  if (isInvoicePageOpen) {
+    return (
+      <InvoicePage 
+        invoiceData={invoiceDocData}
+        onChangeInvoiceData={setInvoiceDocData}
+        onSyncFromCalculator={handleSyncInvoiceFromCalc}
+        onBackToCalculator={closeInvoicePage}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50/50 pb-32 md:pb-20">
       <header className="relative bg-[#3b49df] text-white py-20 px-6 overflow-hidden">
         <div className="absolute top-[-10%] left-[-5%] w-[500px] h-[500px] bg-[#5c67f2] rounded-full blur-[100px] opacity-30 animate-pulse"></div>
         <div className="absolute bottom-[-20%] right-[-5%] w-[400px] h-[400px] bg-[#2a37c7] rounded-full blur-[80px] opacity-50"></div>
         <div className="max-w-6xl mx-auto relative z-10">
-          <div className="flex flex-col items-center md:items-start space-y-4">
-            <div className="p-3 bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-2xl inline-block"><Star className="w-10 h-10 text-white" /></div>
-            <h1 className="text-4xl md:text-5xl font-black tracking-tight text-center md:text-left leading-tight">OneWay <br className="hidden md:block"/><span className="text-indigo-200">media Toolkit</span></h1>
-            <p className="text-indigo-100/80 text-lg md:text-xl max-w-xl font-medium text-center md:text-left leading-relaxed">Platform internal agensi untuk penentuan harga, invoice, dan strategi branding profesional.</p>
+          <div className="flex justify-between items-start">
+            <div className="flex flex-col items-center md:items-start space-y-4">
+              <div className="p-3 bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-2xl inline-block"><Star className="w-10 h-10 text-white" /></div>
+              <h1 className="text-4xl md:text-5xl font-black tracking-tight text-center md:text-left leading-tight">OneWay <br className="hidden md:block"/><span className="text-indigo-200">media Toolkit</span></h1>
+              <p className="text-indigo-100/80 text-lg md:text-xl max-w-xl font-medium text-center md:text-left leading-relaxed">Platform internal agensi untuk penentuan harga, invoice, dan strategi branding profesional.</p>
+            </div>
+            
+            <button
+              onClick={openAdmin}
+              className="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-2xl text-xs font-bold border border-white/20 transition-all backdrop-blur-md shadow-lg"
+              title="Kelola Harga (Rahasia Admin)"
+            >
+              <Lock className="w-3.5 h-3.5" /> Admin
+            </button>
           </div>
         </div>
       </header>
@@ -308,8 +484,8 @@ Apakah rincian dan nominal di atas sudah sesuai? Jika ya, akan segera kami eksek
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {[
                     { id: 'none', label: 'Lewati', desc: 'Tanpa Logo', price: 0, icon: <Layout className="w-4 h-4" /> },
-                    { id: 'client', label: 'Konsep Klien', desc: 'Edit Saja', price: 150000, icon: <CheckCircle2 className="w-4 h-4" /> },
-                    { id: 'full', label: 'Konsep Baru', desc: 'Profesional', price: 200000, icon: <Star className="w-4 h-4" /> },
+                    { id: 'client', label: 'Konsep Klien', desc: 'Edit Saja', price: pricingConfig.constantPrices.LOGO_CLIENT, icon: <CheckCircle2 className="w-4 h-4" /> },
+                    { id: 'full', label: 'Konsep Baru', desc: 'Profesional', price: pricingConfig.constantPrices.LOGO_FULL, icon: <Star className="w-4 h-4" /> },
                   ].map((option) => (
                     <button key={option.id} onClick={() => setState(prev => ({ ...prev, logoType: option.id as any }))} className={`relative p-5 rounded-2xl border-2 text-left transition-all ${state.logoType === option.id ? 'border-indigo-600 bg-indigo-50 shadow-lg shadow-indigo-100' : 'border-slate-100 bg-white hover:border-slate-200'}`}>
                       <div className={`mb-3 p-2 rounded-lg inline-block ${state.logoType === option.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}>{option.icon}</div>
@@ -385,206 +561,88 @@ Apakah rincian dan nominal di atas sudah sesuai? Jika ya, akan segera kami eksek
           </div>
         </section>
 
-        {/* Premium Invoice Preview (Desktop) */}
+        {/* Studio Invoice Studio Launcher Card */}
         <section ref={invoiceSectionRef} className="lg:col-start-3">
           <div className="sticky top-8 space-y-6">
-            <div className="bg-white rounded-[2.5rem] shadow-[0_20px_50px_rgba(0,0,0,0.1)] border border-slate-100 overflow-hidden flex flex-col">
-              <div ref={desktopInvoiceRef} className="bg-white">
-                <div className="relative bg-[#3b49df] p-10 text-white overflow-hidden">
-                   <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -mr-16 -mt-16 blur-3xl"></div>
-                   <div className="absolute bottom-0 left-0 w-24 h-24 bg-indigo-400/20 rounded-full -ml-12 -mb-12 blur-2xl"></div>
-                   
-                   <div className="flex justify-between items-start relative z-10">
-                     <div className="space-y-1">
-                       <div className="flex items-center gap-2">
-                         <div className="bg-white p-1 rounded-md"><Star className="w-4 h-4 text-indigo-600 fill-indigo-600" /></div>
-                         <h2 className="text-xs font-black tracking-[0.2em] uppercase text-indigo-100/70">Official Invoice</h2>
-                       </div>
-                       <h3 className="text-3xl font-black tracking-tighter leading-none mt-2">OneWay media</h3>
-                       <p className="text-[10px] font-bold text-indigo-200/80 uppercase tracking-widest mt-1">Marketplace Agency Solutions</p>
-                     </div>
-                     <div className="flex flex-col items-end">
-                        <BadgeCheck className="w-12 h-12 text-white/40 mb-2" />
-                        <div className="text-[10px] font-black text-white px-2 py-1 bg-white/10 rounded-md border border-white/20">Verified Agency</div>
-                     </div>
-                   </div>
-
-                   <div className="mt-10 flex flex-wrap gap-6 border-t border-white/10 pt-6">
-                      <div className="space-y-1">
-                        <span className="text-[9px] font-black uppercase tracking-widest text-indigo-200/60 block">Tanggal</span>
-                        <div className="flex items-center gap-1.5 text-xs font-bold text-white">
-                          <Calendar className="w-3 h-3 opacity-50" /> {new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}
-                        </div>
-                      </div>
-                      <div className="space-y-1">
-                        <span className="text-[9px] font-black uppercase tracking-widest text-indigo-200/60 block">Invoice No.</span>
-                        <div className="text-xs font-black text-white">#OW-{new Date().getTime().toString().slice(-6)}</div>
-                      </div>
-                   </div>
+            <div className="bg-slate-900 rounded-[2.5rem] shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-slate-800 text-white p-8 space-y-6 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-48 h-48 bg-indigo-600 rounded-full blur-[80px] opacity-30"></div>
+              
+              <div className="relative z-10 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="px-3 py-1 bg-indigo-500/20 text-indigo-300 rounded-full text-[10px] font-black tracking-widest uppercase border border-indigo-500/30">
+                    Official Studio Page
+                  </span>
+                  <BadgeCheck className="w-6 h-6 text-indigo-400" />
                 </div>
                 
-                <div className="px-10 py-10 space-y-10">
-                  <div className="grid grid-cols-2 gap-8">
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2"><div className="w-1 h-3 bg-indigo-600 rounded-full"></div><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Klien</span></div>
-                      <p className="text-sm font-black text-slate-800">{clientName || '-'}</p>
-                    </div>
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2"><div className="w-1 h-3 bg-indigo-600 rounded-full"></div><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Toko</span></div>
-                      <p className="text-sm font-bold text-indigo-600 uppercase tracking-tight">{shopName || '-'}</p>
-                    </div>
-                  </div>
+                <h3 className="text-2xl font-black tracking-tight leading-tight">
+                  Studio Invoice & Cetak A4 (Page Baru)
+                </h3>
+                
+                <p className="text-xs text-slate-400 font-medium leading-relaxed">
+                  Buka halaman khusus invoice full-screen agar tampilan dokumen bersih, rasio A4 presisi, dan hasil cetak PDF/JPG tidak terpotong.
+                </p>
+              </div>
 
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                       <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Item Layanan</span>
-                       <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Nominal</span>
-                    </div>
-                    
-                    <div className="space-y-5">
-                      <ReceiptItem label="Upload Produk" count={breakdown.upload.count} value={formatIDR(breakdown.upload.total)} details={`${breakdown.upload.count}x @ ${formatIDR(breakdown.upload.rate)}`} />
-                      <ReceiptItem label="Desain Foto" count={breakdown.photo.count} value={formatIDR(breakdown.photo.total)} details={`${breakdown.photo.count}x @ ${formatIDR(breakdown.photo.rate)}`} />
-                      <ReceiptItem label="Banner Toko" count={breakdown.banner.count} value={formatIDR(breakdown.banner.total)} />
-                      <ReceiptItem label="Video Produk" count={breakdown.video.count} value={formatIDR(breakdown.video.total)} />
-                      {state.logoType !== 'none' && <ReceiptItem label="Jasa Branding Logo" value={formatIDR(breakdown.logo.total)} details={breakdown.logo.type} />}
-                      {state.extraFees.map(fee => <ReceiptItem key={fee.id} label={fee.label} value={formatIDR(fee.amount)} />)}
-                      
-                      {breakdown.subtotal === 0 && (
-                        <div className="text-center py-16 opacity-30 border-2 border-dashed border-slate-100 rounded-3xl">
-                          <FileText className="w-12 h-12 mx-auto mb-2 text-slate-200" />
-                          <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-300">Daftar pesanan kosong</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="bg-slate-50/80 rounded-[2rem] p-8 space-y-4 border border-slate-100">
-                    <div className="flex justify-between items-center text-xs font-bold text-slate-500 uppercase tracking-widest">
-                      <span>Subtotal</span>
-                      <span>{formatIDR(breakdown.subtotal)}</span>
-                    </div>
-                    {breakdown.discount > 0 && (
-                      <div className="flex justify-between items-center text-xs font-black text-rose-500 uppercase tracking-widest">
-                        <span>Diskon Khusus</span>
-                        <span>- {formatIDR(breakdown.discount)}</span>
-                      </div>
-                    )}
-                    <div className="pt-4 border-t border-slate-200 flex justify-between items-end">
-                      <div className="space-y-1">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Total Pembayaran</span>
-                        <div className="text-4xl font-black text-indigo-600 tracking-tighter leading-none">{formatIDR(breakdown.grandTotal)}</div>
-                      </div>
-                      <div className="text-[10px] font-black text-white px-3 py-1.5 bg-indigo-600 rounded-full shadow-lg shadow-indigo-100">
-                        OFFICIAL QUOTE
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-6 pt-4">
-                    <div className="grid grid-cols-2 gap-4">
-                       <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                         <div className="bg-indigo-100 p-2 rounded-xl text-indigo-600"><Clock className="w-4 h-4" /></div>
-                         <div className="text-[10px] font-bold text-slate-600 uppercase leading-tight">Pay after project <br/> is completed</div>
-                       </div>
-                       <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                         <div className="bg-indigo-100 p-2 rounded-xl text-indigo-600"><ShieldCheck className="w-4 h-4" /></div>
-                         <div className="text-[10px] font-bold text-slate-600 uppercase leading-tight">Minor revision <br/> included</div>
-                       </div>
-                    </div>
-
-                    <div className="pt-8 border-t border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 text-[9px] font-black text-slate-300 uppercase tracking-[0.3em]">
-                       <div className="flex items-center gap-4">
-                         <span className="flex items-center gap-1.5"><Instagram className="w-3.5 h-3.5" /> oneway.media</span>
-                         <span className="flex items-center gap-1.5"><Globe className="w-3.5 h-3.5" /> owm.agency</span>
-                       </div>
-                       <span className="text-indigo-600 opacity-60 font-black">Thank you for choosing us</span>
-                    </div>
-                  </div>
+              {/* Total Tagihan Summary Card */}
+              <div className="relative z-10 bg-slate-800/90 rounded-2xl p-5 border border-slate-700/80 space-y-3">
+                <div className="flex justify-between items-center text-xs text-slate-400">
+                  <span className="font-bold">Klien:</span>
+                  <span className="font-extrabold text-white">{clientName || 'Yudha Kurniawan'}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs text-slate-400">
+                  <span className="font-bold">Total Kalkulasi:</span>
+                  <span className="font-black text-emerald-400 text-base">{formatIDR(breakdown.grandTotal)}</span>
+                </div>
+                <div className="pt-2 border-t border-slate-700/60 text-[10px] text-slate-400 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Data item otomatis terhubung ke Studio Invoice</span>
                 </div>
               </div>
 
-              {/* Action Buttons - More Integrated */}
-              <div className="px-10 pb-10 space-y-4">
-                <button onClick={handleSendInvoice} className="w-full py-5 bg-[#3b49df] text-white rounded-[1.5rem] font-black text-lg flex items-center justify-center gap-3 hover:bg-[#2a37c7] transition-all shadow-xl shadow-indigo-200/50 active:scale-[0.98]">
-                  <Send className="w-6 h-6" /> Kirim Invoice ke WA
+              {/* Primary Action Button to open Page Baru */}
+              <div className="relative z-10 space-y-3 pt-2">
+                <button 
+                  onClick={openInvoicePage} 
+                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-black text-sm flex items-center justify-center gap-3 transition-all shadow-xl shadow-indigo-600/30 active:scale-[0.98]"
+                >
+                  <FileText className="w-5 h-5" /> Buka Studio Invoice (Page Baru)
                 </button>
-                <div className="grid grid-cols-2 gap-4">
-                  <button onClick={downloadInvoiceImage} disabled={isDownloading || breakdown.subtotal === 0} className="py-4 bg-slate-50 text-indigo-600 border border-indigo-100 rounded-[1.2rem] font-black text-xs flex items-center justify-center gap-2 hover:bg-indigo-50 disabled:opacity-50 transition-all">
-                    {isDownloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />} Unduh Gambar
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={openInvoicePage} 
+                    className="py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 border border-slate-700"
+                  >
+                    <Printer className="w-4 h-4 text-emerald-400" /> Cetak PDF A4
                   </button>
-                  <button onClick={copyToClipboard} className="py-4 bg-slate-50 text-slate-500 border border-slate-200 rounded-[1.2rem] font-black text-xs flex items-center justify-center gap-2 hover:bg-slate-100 transition-all">
-                    <Copy className="w-4 h-4" /> Salin Teks
+
+                  <button 
+                    onClick={handleSendInvoice} 
+                    className="py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 border border-slate-700"
+                  >
+                    <Send className="w-4 h-4 text-green-400" /> Kirim WA
                   </button>
                 </div>
               </div>
+
             </div>
           </div>
         </section>
       </main>
 
+      {/* Floating Bar Mobile */}
       <div className={`lg:hidden fixed bottom-6 left-6 right-6 z-50 transition-all duration-500 transform ${showFloatingBar ? 'translate-y-0 opacity-100' : 'translate-y-20 opacity-0 pointer-events-none'}`}>
-        <div onClick={() => setIsDetailsOpen(true)} className="w-full py-3 bg-[#3b49df] text-white rounded-full shadow-2xl font-black flex items-center justify-between pl-8 pr-3 border border-white/20">
-          <div className="flex flex-col"><span className="text-[10px] font-black uppercase tracking-widest opacity-60">Total Penawaran</span><span className="text-xl font-black tracking-tight">{formatIDR(breakdown.grandTotal)}</span></div>
-          <div className="bg-white/20 px-6 py-4 rounded-full font-black text-xs uppercase tracking-widest flex items-center gap-2">Review <ArrowRight className="w-4 h-4" /></div>
-        </div>
-      </div>
-
-      {isDetailsOpen && (
-        <div className="fixed inset-0 z-[100] lg:hidden">
-          <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" onClick={() => setIsDetailsOpen(false)} />
-          <div className="absolute bottom-0 left-0 right-0 bg-white rounded-t-[3rem] animate-in slide-in-from-bottom duration-300 max-h-[95vh] overflow-y-auto overflow-x-hidden">
-            <div className="w-12 h-1.5 bg-slate-200 rounded-full mx-auto my-6" />
-            
-            <div className="px-4 pb-12 space-y-8 max-w-full">
-              <div ref={mobileInvoiceRef} className="bg-white border border-slate-100 rounded-[2rem] overflow-hidden w-full">
-                <div className="bg-[#3b49df] text-white p-6 relative overflow-hidden">
-                  <div className="relative z-10 flex justify-between items-start">
-                    <div>
-                      <div className="text-[8px] font-black uppercase tracking-widest text-indigo-200">Official Document</div>
-                      <div className="text-xl font-black tracking-tight">OneWay media</div>
-                    </div>
-                    <BadgeCheck className="w-8 h-8 opacity-40 shrink-0" />
-                  </div>
-                  <div className="mt-8 grid grid-cols-2 gap-4 border-t border-white/10 pt-4 relative z-10">
-                    <div className="min-w-0"><span className="text-[8px] font-black uppercase text-indigo-200 opacity-60">Klien</span><p className="text-[11px] font-black uppercase truncate">{clientName || '-'}</p></div>
-                    <div className="min-w-0"><span className="text-[8px] font-black uppercase text-indigo-200 opacity-60">Toko</span><p className="text-[11px] font-black uppercase truncate">{shopName || '-'}</p></div>
-                  </div>
-                </div>
-
-                <div className="p-5 space-y-6">
-                  <div className="space-y-4">
-                    <ReceiptItem label="Upload Produk" count={breakdown.upload.count} value={formatIDR(breakdown.upload.total)} details={`${breakdown.upload.count}x @ ${formatIDR(breakdown.upload.rate)}`} />
-                    <ReceiptItem label="Desain Foto" count={breakdown.photo.count} value={formatIDR(breakdown.photo.total)} details={`${breakdown.photo.count}x @ ${formatIDR(breakdown.photo.rate)}`} />
-                    <ReceiptItem label="Banner Toko" count={breakdown.banner.count} value={formatIDR(breakdown.banner.total)} />
-                    <ReceiptItem label="Video Produk" count={breakdown.video.count} value={formatIDR(breakdown.video.total)} />
-                    {state.logoType !== 'none' && <ReceiptItem label="Jasa Logo" value={formatIDR(breakdown.logo.total)} details={breakdown.logo.type} />}
-                    {state.extraFees.map(fee => <ReceiptItem key={fee.id} label={fee.label} value={formatIDR(fee.amount)} />)}
-                  </div>
-                  
-                  <div className="pt-6 border-t border-slate-100 space-y-2">
-                    <div className="flex justify-between text-[10px] font-black text-slate-400 uppercase tracking-widest"><span>Subtotal</span><span>{formatIDR(breakdown.subtotal)}</span></div>
-                    {breakdown.discount > 0 && <div className="flex justify-between text-[10px] font-black text-rose-500 uppercase tracking-widest"><span>Diskon</span><span>-{formatIDR(breakdown.discount)}</span></div>}
-                    <div className="flex justify-between items-end pt-4">
-                      <span className="text-[9px] font-black text-slate-300 uppercase tracking-widest shrink-0">Grand Total</span>
-                      <span className="text-3xl font-black text-indigo-600 tracking-tighter truncate ml-2">{formatIDR(breakdown.grandTotal)}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <button onClick={handleSendInvoice} className="w-full py-5 bg-[#3b49df] text-white rounded-2xl font-black text-lg flex items-center justify-center gap-3 shadow-xl shadow-indigo-100"><Send className="w-5 h-5" /> Kirim ke WhatsApp</button>
-                <div className="grid grid-cols-2 gap-3">
-                  <button onClick={downloadInvoiceImage} disabled={isDownloading || breakdown.subtotal === 0} className="py-4 bg-white text-indigo-600 border-2 border-indigo-100 rounded-2xl font-black text-sm flex items-center justify-center gap-2 transition-all">
-                    {isDownloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />} JPG
-                  </button>
-                  <button onClick={() => setIsDetailsOpen(false)} className="py-4 bg-slate-50 text-slate-500 rounded-2xl font-black text-sm">Kembali</button>
-                </div>
-              </div>
-            </div>
+        <div onClick={openInvoicePage} className="w-full py-3.5 bg-[#3b49df] text-white rounded-full shadow-2xl font-black flex items-center justify-between pl-6 pr-3 border border-white/20 active:scale-95 transition-all">
+          <div className="flex flex-col">
+            <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Dokumen Invoice</span>
+            <span className="text-lg font-black tracking-tight">{formatIDR(breakdown.grandTotal)}</span>
+          </div>
+          <div className="bg-white/20 px-5 py-3 rounded-full font-black text-xs uppercase tracking-widest flex items-center gap-2">
+            Studio Invoice <ArrowRight className="w-4 h-4" />
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
