@@ -60,7 +60,9 @@ export default function InvoiceView({
   };
 
   // Calculate total across all projects
-  const totalKeseluruhan = invoiceData.projects.reduce((sum, p) => sum + getProjectSubtotal(p), 0);
+  const subtotal = invoiceData.projects.reduce((sum, p) => sum + getProjectSubtotal(p), 0);
+  const discountVal = invoiceData.discountAmount || 0;
+  const totalKeseluruhan = Math.max(0, subtotal - discountVal);
   const sisaTagihan = Math.max(0, totalKeseluruhan - (invoiceData.dpAmount || 0));
 
   // Editor Handlers
@@ -438,6 +440,18 @@ export default function InvoiceView({
 
               <div className="pt-2 grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-1">
+                  <label className="text-[11px] font-black text-slate-400 uppercase">Diskon / Potongan Harga (Rp)</label>
+                  <input
+                    type="number"
+                    value={invoiceData.discountAmount || 0}
+                    onChange={(e) => handleUpdateInfo('discountAmount', Math.max(0, Number(e.target.value)))}
+                    className="w-full px-3 py-2 text-xs font-bold bg-emerald-50/50 text-emerald-900 rounded-xl border border-emerald-200 outline-none"
+                    placeholder="0"
+                  />
+                  <span className="text-[10px] text-slate-400 block font-medium">Potongan harga mengurangi subtotal tagihan.</span>
+                </div>
+
+                <div className="space-y-1">
                   <label className="text-[11px] font-black text-slate-400 uppercase">Uang Muka (DP) / Pembayaran Awal (Rp)</label>
                   <input
                     type="number"
@@ -582,10 +596,27 @@ export default function InvoiceView({
               </div>
             ))}
 
-            <div className="flex justify-between items-center text-slate-800 font-extrabold text-sm pt-1">
-              <span>Total Keseluruhan:</span>
-              <span className="text-[#0f172a]">{formatIDRDocument(totalKeseluruhan)}</span>
-            </div>
+            {discountVal > 0 ? (
+              <>
+                <div className="flex justify-between items-center text-slate-700 font-medium">
+                  <span>Subtotal:</span>
+                  <span className="font-bold text-slate-900">{formatIDRDocument(subtotal)}</span>
+                </div>
+                <div className="flex justify-between items-center text-emerald-600 font-bold">
+                  <span>Diskon / Potongan Harga:</span>
+                  <span>- {formatIDRDocument(discountVal)}</span>
+                </div>
+                <div className="flex justify-between items-center text-slate-800 font-extrabold text-sm pt-1 border-t border-slate-200">
+                  <span>Total Keseluruhan:</span>
+                  <span className="text-[#0f172a]">{formatIDRDocument(totalKeseluruhan)}</span>
+                </div>
+              </>
+            ) : (
+              <div className="flex justify-between items-center text-slate-800 font-extrabold text-sm pt-1">
+                <span>Total Keseluruhan:</span>
+                <span className="text-[#0f172a]">{formatIDRDocument(totalKeseluruhan)}</span>
+              </div>
+            )}
 
             {invoiceData.dpAmount > 0 && (
               <div className="flex justify-between items-center text-slate-700 font-bold">

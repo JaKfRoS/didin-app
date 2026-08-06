@@ -127,6 +127,7 @@ export interface InvoiceDocumentData {
     accountNumber: string;
     accountName: string;
   };
+  discountAmount?: number;
   dpAmount: number;
   footerNote: string;
 }
@@ -219,6 +220,7 @@ export const createDefaultInvoiceData = (clientName = '', shopName = '', breakdo
       accountNumber: '9013 1445 4996',
       accountName: 'OneWay'
     },
+    discountAmount: breakdown ? breakdown.discount : 0,
     dpAmount: 0,
     footerNote: 'Terima kasih telah bekerja sama dengan OneWay.'
   };

@@ -158,9 +158,10 @@ export default function App() {
     setInvoiceDocData(prev => ({
       ...prev,
       clientName: clientName || prev.clientName,
-      projectDescription: shopName ? `Project Pembuatan Akun Shopee (${shopName})` : prev.projectDescription
+      projectDescription: shopName ? `Project Pembuatan Akun Shopee (${shopName})` : prev.projectDescription,
+      discountAmount: breakdown.discount
     }));
-  }, [clientName, shopName]);
+  }, [clientName, shopName, breakdown.discount]);
 
   // Listen for /admin path, #admin or #invoice hash
   useEffect(() => {
